@@ -1,0 +1,132 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+Code:
+library(raster)
+library(rgdal)
+library(maps)
+library(mapdata)
+library(dismo)
+library(rJava)
+library(maptools)
+library(jsonlite)
+library(glmnet)
+library(maxnet)
+
+rm(list = ls())
+f <- file.choose('Perdita Data.csv')
+
+# read in the bee occurrence data file
+beeData <- read.csv(f)
+
+# parse the df
+PE.df <- beeData[1:715, ]
+PM.df <- beeData[716: 1553, ]
+PP.df <- beeData[1556: 2440, ]
+
+#get data
+#current environmental data from Worldclim
+currentEnv=getData("worldclim", var="bio", res=2.5)
+#predictions for 2070
+futureEnv=getData('CMIP5', var='bio', res=2.5, rcp=85, model='HE', year=70)
+names(futureEnv)=names(currentEnv)
+#limit bioclimactic predictors
+currentEnv=dropLayer(currentEnv, c("bio2", "bio3", "bio4", "bio10", "bio11", "bio13", "bio14", "bio15" ))
+futureEnv=dropLayer(futureEnv, c("bio2", "bio3", "bio4", "bio10", "bio11", "bio13", "bio14", "bio15" ))
+
+#making model past v. future climate:
+model.extent<-extent(-130,-100, 25,40) #numbers are for map of continental US
+modelEnv=crop(currentEnv,model.extent)
+modelFutureEnv=crop(futureEnv, model.extent)
+
+#plot the species data
+map('worldHires',fill=T , col= "light yellow", bg="light blue",xlim = c(-130,-100),ylim = c(25, 40))
+points(cbind(PM.df$decimalLongitude, PM.df$decimalLatitude),col="red", pch=20, cex=0.3)
+points(cbind(PE.df$decimalLongitude, PE.df$decimalLatitude),col="purple", pch=20, cex=0.3)
+points(cbind(PP.df$decimalLongitude, PP.df$decimalLatitude),col="olivedrab", pch=20, cex=0.3)
+
+#compare to 2070
+plot(modelFutureEnv[["bio17"]]/10, main="Precipitation of Driest Quarter")
+plot(modelFutureEnv[["bio1"]]/10, main="Future Annual Mean Temperature")
+map('worldHires',xlim = c(-130,-100), ylim = c(25,40), fill=FALSE, add=TRUE)
+points(cbind(PM.df$decimalLongitude, PM.df$decimalLatitude),col="red", pch=20, cex=0.3)
+points(cbind(PE.df$decimalLongitude, PE.df$decimalLatitude),col="purple", pch=20, cex=0.3)
+points(cbind(PP.df$decimalLongitude, PP.df$decimalLatitude),col="black", pch=20, cex=0.3)
+
+#we will withold 20% of our data as test data to test the accuracy of the model later
+#using the other 80% of the data to make the model
+PMocc=cbind.data.frame(PM.df$decimalLongitude, PM.df$decimalLatitude) #first, trim the data frame to include only latitudes and longitudes for the model
+PMfold <- kfold(PMocc, k=5) # add an index that makes five random groups of observations
+PMtest <- PMocc[PMfold == 1, ] # hold out one fifth as test data
+PMtrain <- PMocc[PMfold != 1, ] # the other four fifths are training data
+
+PEocc=cbind.data.frame(PE.df$decimalLongitude, PE.df$decimalLatitude) #first, trim the data frame to include only latitudes and longitudes for the model
+PEfold <- kfold(PEocc, k=5) # add an index that makes five random groups of observations
+PEtest <- PEocc[PEfold == 1, ] # hold out one fifth as test data
+PEtrain <- PEocc[PEfold != 1, ] # the other four fifths are training data
+
+PPocc=cbind.data.frame(PP.df$decimalLongitude, PP.df$decimalLatitude) #first, trim the data frame to include only latitudes and longitudes for the model
+PPfold <- kfold(PPocc, k=5) # add an index that makes five random groups of observations
+PPtest <- PPocc[PPfold == 1, ] # hold out one fifth as test data
+PPtrain <- PPocc[PPfold != 1, ] # the other four fifths are training data
+
+#now we make a new environment that extracts the model environment values for our occurance values
+PMTrainEnv <- extract(modelEnv, PMtrain)
+PETrainEnv <- extract(modelEnv, PEtrain)
+PPTrainEnv <- extract(modelEnv, PPtrain)
+
+#then, we take 1000 random background points, and extract the values for our model environment for those points
+#these are our background points, our absence points
+set.seed(0)
+backgr <- randomPoints(modelEnv, 1000)
+absvals <- extract(modelEnv, backgr)
+
+#we make a presence/absence collumn where 1=presence for our occurance points, and 0=absence for our background points
+PMpresabs <- c(rep(1, nrow(PMTrainEnv)), rep(0, nrow(absvals)))
+PEpresabs <- c(rep(1, nrow(PETrainEnv)), rep(0, nrow(absvals)))
+PPpresabs <- c(rep(1, nrow(PPTrainEnv)), rep(0, nrow(absvals)))
+
+#we make a dataset that combines the presence and absence data, the background points with their model environment values,
+#and the occurance points with their model environment values
+PMsdmdata <- data.frame(cbind(PMpresabs, rbind(PMTrainEnv, absvals)))
+PEsdmdata <- data.frame(cbind(PEpresabs, rbind(PETrainEnv, absvals)))
+PPsdmdata <- data.frame(cbind(PPpresabs, rbind(PPTrainEnv, absvals)))
+
+#we make a subset of that dataset, without the presence and absence values
+PMdata <- PMsdmdata[,-1]
+PEdata <- PEsdmdata[,-1]
+PPdata <- PPsdmdata[,-1]
+
+#Clear NA's
+PMsdmdata <- PMsdmdata[!is.na(PMsdmdata$bio1), ]
+PEsdmdata <- PEsdmdata[!is.na(PEsdmdata$bio1), ]
+PPsdmdata <- PPsdmdata[!is.na(PPsdmdata$bio1), ]
+
+PMdata <- PMdata[!is.na(PMdata$bio1), ]
+PEdata <- PEdata[!is.na(PEdata$bio1), ]
+PPdata <- PPdata[!is.na(PPdata$bio1), ]
+
+#we run the maxnet function to fit the SDM
+#maxnet fits using glmnet
+PM.me<-maxnet(PMsdmdata$PMpresabs, PMdata)
+PE.me<-maxnet(PEsdmdata$PEpresabs, PEdata)
+PP.me<-maxnet(PPsdmdata$PPpresabs, PPdata)
+
+#plot logistic regression for stats
+plot(PM.me, type = "logistic")
+plot(PE.me, type = "logistic")
+plot(PP.me, type = "logistic")
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
